@@ -19,10 +19,13 @@ struct drm_buffer_t {
 
 struct drm_dev_t {
 	uint32_t conn_id, enc_id, crtc_id;
-	uint32_t width, height;
+	uint32_t width, height, pitch;
 	drmModeModeInfo mode;
 	drmModeCrtc *saved_crtc;
 	struct drm_dev_t *next;
+
+	int v4l2_fd;
+	int drm_fd;
 
 	struct drm_buffer_t bufs[BUFCOUNT];
 };

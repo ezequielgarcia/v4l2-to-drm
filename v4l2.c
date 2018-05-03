@@ -34,10 +34,10 @@ void v4l2_queue_buffer(int fd, int index, int dmabuf_fd)
 	if (memory_type == V4L2_MEMORY_DMABUF)
 		buf.m.fd = dmabuf_fd;
 	if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
-		errno_exit("VIDIOC_QBUF");
+		errno_print("VIDIOC_QBUF");
 }
 
-void v4l2_dequeue_buffer(int fd, struct v4l2_buffer *buf)
+int v4l2_dequeue_buffer(int fd, struct v4l2_buffer *buf)
 {	
 	PCLEAR(buf);
 
@@ -47,16 +47,17 @@ void v4l2_dequeue_buffer(int fd, struct v4l2_buffer *buf)
 	if (-1 == xioctl(fd, VIDIOC_DQBUF, buf)) {
 		switch (errno) {
 		case EAGAIN:
-			return;
+			return 0;
 		case EIO:
 			/* Could ignore EIO, see spec. */
 			/* fall through */
 		default:
-			errno_exit("VIDIOC_DQBUF");
+			errno_print("VIDIOC_DQBUF");
 		}
 	}
 
 	assert(buf->index < n_buffers);
+	return 1;
 }
 
 void v4l2_stop_capturing(int fd)
@@ -65,7 +66,7 @@ void v4l2_stop_capturing(int fd)
 
 	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (-1 == xioctl(fd, VIDIOC_STREAMOFF, &type))
-		errno_exit("VIDIOC_STREAMOFF");
+		errno_print("VIDIOC_STREAMOFF");
 }
 
 void v4l2_start_capturing_dmabuf(int fd)
@@ -79,7 +80,7 @@ void v4l2_start_capturing_dmabuf(int fd)
 
 	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (-1 == xioctl(fd, VIDIOC_STREAMON, &type))
-		errno_exit("VIDIOC_STREAMON");
+		errno_print("VIDIOC_STREAMON");
 }
 
 void v4l2_start_capturing_mmap(int fd)
@@ -96,12 +97,12 @@ void v4l2_start_capturing_mmap(int fd)
 		buf.index = i;
 
 		if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
-			errno_exit("VIDIOC_QBUF");
+			errno_print("VIDIOC_QBUF");
 	}
 
 	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (-1 == xioctl(fd, VIDIOC_STREAMON, &type))
-		errno_exit("VIDIOC_STREAMON");
+		errno_print("VIDIOC_STREAMON");
 }
 
 void v4l2_uninit_device(void)
@@ -110,7 +111,7 @@ void v4l2_uninit_device(void)
 
 	for (i = 0; i < n_buffers; ++i)
 		if (-1 == munmap(buffers[i].start, buffers[i].length))
-			errno_exit("munmap");
+			errno_print("munmap");
 	free(buffers);
 }
 
@@ -130,7 +131,7 @@ void v4l2_init_dmabuf(int fd, int *dmabufs, int count)
 			fprintf(stderr, "does not support dmabuf\n");
 			exit(EXIT_FAILURE);
 		} else {
-			errno_exit("VIDIOC_REQBUFS");
+			errno_print("VIDIOC_REQBUFS");
 		}
 	}
 
@@ -156,7 +157,7 @@ void v4l2_init_dmabuf(int fd, int *dmabufs, int count)
 		buf.index       = n_buffers;
 
 		if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf))
-			errno_exit("VIDIOC_QUERYBUF");
+			errno_print("VIDIOC_QUERYBUF");
 		buffers[n_buffers].index = buf.index;
 		buffers[n_buffers].dmabuf_fd = dmabufs[n_buffers];
 	}
@@ -178,7 +179,7 @@ void v4l2_init_mmap(int fd, int count)
 			fprintf(stderr, "does not support mmap\n");
 			exit(EXIT_FAILURE);
 		} else {
-			errno_exit("VIDIOC_REQBUFS");
+			errno_print("VIDIOC_REQBUFS");
 		}
 	}
 
@@ -204,7 +205,7 @@ void v4l2_init_mmap(int fd, int count)
 		buf.index       = n_buffers;
 
 		if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf))
-			errno_exit("VIDIOC_QUERYBUF");
+			errno_print("VIDIOC_QUERYBUF");
 
 		buffers[n_buffers].length = buf.length;
 		buffers[n_buffers].start =
@@ -215,11 +216,11 @@ void v4l2_init_mmap(int fd, int count)
 					fd, buf.m.offset);
 
 		if (MAP_FAILED == buffers[n_buffers].start)
-			errno_exit("mmap");
+			errno_print("mmap");
 	}
 }
 
-void v4l2_init(int fd, int width, int height)
+void v4l2_init(int fd, int width, int height, int pitch)
 {
 	struct v4l2_capability cap;
 	struct v4l2_cropcap cropcap;
@@ -232,7 +233,7 @@ void v4l2_init(int fd, int width, int height)
 			fprintf(stderr, "not a V4L2 device\n");
 			exit(EXIT_FAILURE);
 		} else {
-			errno_exit("VIDIOC_QUERYCAP");
+			errno_print("VIDIOC_QUERYCAP");
 		}
 	}
 
@@ -272,9 +273,10 @@ void v4l2_init(int fd, int width, int height)
 	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_ABGR32;
 	fmt.fmt.pix.field       = V4L2_FIELD_NONE;
 	fmt.fmt.pix.colorspace  = V4L2_COLORSPACE_RAW;
+	fmt.fmt.pix.bytesperline = pitch;
 
 	if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt))
-		errno_exit("VIDIOC_S_FMT");
+		errno_print("VIDIOC_S_FMT");
 
 	/* Note VIDIOC_S_FMT may change width and height. */
 

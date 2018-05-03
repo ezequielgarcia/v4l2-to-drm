@@ -10,50 +10,73 @@
 
 static const char *dri_path = "/dev/dri/card0";
 static const char *v4l2_path = "/dev/video0";
-static int frame_count = -1;
+static int next_buffer_index = -1;
+static int curr_buffer_index = 0;
 
-static int wait_poll(int v4l2_fd, int drm_fd)
+static void page_flip_handler(int fd, unsigned int frame,
+			unsigned int sec, unsigned int usec,
+			void *data)
 {
-	struct pollfd fds[] = {
-		{ .fd = v4l2_fd, .events = POLLIN },
-		{ .fd = drm_fd, .events = POLLIN },
-	};
+	struct drm_dev_t *dev = data;
 
-        return poll(fds, 2, 2000);
+	/* If we have a next buffer, then let's return the current one,
+	 * and grab the next one.
+	 */
+	if (next_buffer_index > 0) {
+		v4l2_queue_buffer(dev->v4l2_fd, curr_buffer_index, dev->bufs[curr_buffer_index].dmabuf_fd);
+		curr_buffer_index = next_buffer_index;
+		next_buffer_index = -1;
+	}
+	drmModePageFlip(fd, dev->crtc_id, dev->bufs[curr_buffer_index].fb_id,
+			      DRM_MODE_PAGE_FLIP_EVENT, dev);
 }
 
 static void mainloop(int v4l2_fd, int drm_fd, struct drm_dev_t *dev)
 {
 	struct v4l2_buffer buf;
-	unsigned int count, current;
+	drmEventContext ev;
 	int r;
 
-	count = frame_count;
-	current = 0;
+        memset(&ev, 0, sizeof ev);
+        ev.version = DRM_EVENT_CONTEXT_VERSION;
+        ev.vblank_handler = NULL;
+        ev.page_flip_handler = page_flip_handler;
 
-	while (count-- > 0) {
-		for (;;) {
-			r = wait_poll(v4l2_fd, drm_fd);
-			if (-1 == r) {
-				if (EINTR == errno)
-					continue;
-				errno_exit("select");
+	struct pollfd fds[] = {
+		{ .fd = STDIN_FILENO, .events = POLLIN },
+		{ .fd = v4l2_fd, .events = POLLIN },
+		{ .fd = drm_fd, .events = POLLIN },
+	};
+
+	while (1) {
+		r = poll(fds, 3, 3000);
+		if (-1 == r) {
+			if (EINTR == errno)
+				continue;
+			printf("error in poll %d", errno);
+			return;
+		}
+
+		if (0 == r) {
+			fprintf(stderr, "timeout\n");
+			return;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			fprintf(stdout, "User requested exit\n");
+			return;
+		}
+		if (fds[1].revents & POLLIN) {
+			/* Video buffer captured, dequeue it
+			 * and store it for scanout.
+			 */
+			int dequeued = v4l2_dequeue_buffer(v4l2_fd, &buf);
+			if (dequeued) {
+				next_buffer_index = buf.index;
 			}
-
-			if (0 == r) {
-				fprintf(stderr, "timeout\n");
-				exit(EXIT_FAILURE);
-			}
-
-			v4l2_dequeue_buffer(v4l2_fd, &buf);
-
-			/* kind of a buffer flip, but wrong */
-			drmModeSetCrtc(drm_fd, dev->crtc_id, dev->bufs[buf.index].fb_id,
-				       0, 0, &dev->conn_id, 1, &dev->mode);
-			drmModeDirtyFB(drm_fd, dev->bufs[buf.index].fb_id, NULL, 0);
-
-			v4l2_queue_buffer(v4l2_fd, current, dev->bufs[current].dmabuf_fd);
-			current = buf.index;
+		}
+		if (fds[2].revents & POLLIN) {
+			drmHandleEvent(drm_fd, &ev);
 		}
 	}
 }
@@ -72,8 +95,6 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	getchar();
-
 	dev = dev_head;
 	drm_setup_fb(drm_fd, dev, 0, 1);
 
@@ -83,9 +104,12 @@ int main()
 	dmabufs[3] = dev->bufs[3].dmabuf_fd;
 
 	v4l2_fd = v4l2_open(v4l2_path);
-	v4l2_init(v4l2_fd, dev->width, dev->height);
+	v4l2_init(v4l2_fd, dev->width, dev->height, dev->pitch);
 	v4l2_init_dmabuf(v4l2_fd, dmabufs, BUFCOUNT);
 	v4l2_start_capturing_dmabuf(v4l2_fd);
+
+	dev->v4l2_fd = v4l2_fd;
+	dev->drm_fd = drm_fd;
 
 	mainloop(v4l2_fd, drm_fd, dev);
 
