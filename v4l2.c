@@ -278,6 +278,10 @@ void v4l2_init(int fd, int width, int height, int pitch)
 	if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt))
 		errno_print("VIDIOC_S_FMT");
 
+	printf("v4l2 negotiated format: ");
+	printf("size = %dx%d, ", fmt.fmt.pix.width, fmt.fmt.pix.height);
+	printf("pitch = %d bytes\n", fmt.fmt.pix.bytesperline);
+
 	/* Note VIDIOC_S_FMT may change width and height. */
 
 	/* Buggy driver paranoia. */

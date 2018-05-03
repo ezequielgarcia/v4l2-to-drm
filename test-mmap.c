@@ -58,7 +58,7 @@ int main()
 	struct drm_dev_t *dev_head, *dev;
 	int v4l2_fd, drm_fd;
 
-	drm_fd = drm_open(dri_path);
+	drm_fd = drm_open(dri_path, 1, 0);
 	dev_head = drm_find_dev(drm_fd);
 
 	if (dev_head == NULL) {

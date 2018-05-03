@@ -87,7 +87,7 @@ int main()
 	int v4l2_fd, drm_fd;
 	int dmabufs[BUFCOUNT];
 
-	drm_fd = drm_open(dri_path);
+	drm_fd = drm_open(dri_path, 1, 1);
 	dev_head = drm_find_dev(drm_fd);
 
 	if (dev_head == NULL) {

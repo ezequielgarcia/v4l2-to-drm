@@ -42,7 +42,8 @@ inline static void error(char *str)
 	exit(EXIT_FAILURE);
 }
 
-int drm_open(const char *path);
+int drm_open(const char *path, int need_dumb, int need_prime);
 struct drm_dev_t *drm_find_dev(int fd);
+void drm_setup_dummy(int fd, struct drm_dev_t *dev, int map, int export);
 void drm_setup_fb(int fd, struct drm_dev_t *dev, int map, int export);
 void drm_destroy(int fd, struct drm_dev_t *dev_head);
