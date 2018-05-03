@@ -1,13 +1,15 @@
-#define _XOPEN_SOURCE 600
-
+#define _GNU_SOURCE
+#define _XOPEN_SOURCE 701
 
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
-
+#include <libdrm/drm.h>
 #include "drm.h"
 
 struct color_rgb32 {
@@ -84,11 +86,12 @@ int drm_open(const char *path)
 
 struct drm_dev_t *drm_find_dev(int fd)
 {
-	int i;
+	int i, m;
 	struct drm_dev_t *dev = NULL, *dev_head = NULL;
 	drmModeRes *res;
 	drmModeConnector *conn;
 	drmModeEncoder *enc;
+	drmModeModeInfo *mode = NULL, *preferred = NULL;
 
 	if ((res = drmModeGetResources(fd)) == NULL)
 		fatal("drmModeGetResources() failed");
@@ -101,13 +104,24 @@ struct drm_dev_t *drm_find_dev(int fd)
 			dev = (struct drm_dev_t *) malloc(sizeof(struct drm_dev_t));
 			memset(dev, 0, sizeof(struct drm_dev_t));
 
+			/* find preferred mode */
+			for (m = 0; m < conn->count_modes; m++) {
+				mode = &conn->modes[m];
+				if (mode->type & DRM_MODE_TYPE_PREFERRED)
+					preferred = mode;
+				fprintf(stdout, "mode: %dx%d %s\n", mode->hdisplay, mode->vdisplay, mode->type & DRM_MODE_TYPE_PREFERRED ? "*" : "");
+			}
+
+			if (!preferred)
+				preferred = &conn->modes[0];
+
 			dev->conn_id = conn->connector_id;
 			dev->enc_id = conn->encoder_id;
 			dev->next = NULL;
 
-			memcpy(&dev->mode, &conn->modes[0], sizeof(drmModeModeInfo));
-			dev->width = conn->modes[0].hdisplay;
-			dev->height = conn->modes[0].vdisplay;
+			memcpy(&dev->mode, preferred, sizeof(drmModeModeInfo));
+			dev->width = preferred->hdisplay;
+			dev->height = preferred->vdisplay;
 
 			/* FIXME: use default encoder/crtc pair */
 			if ((enc = drmModeGetEncoder(fd, dev->enc_id)) == NULL)
@@ -123,50 +137,75 @@ struct drm_dev_t *drm_find_dev(int fd)
 		}
 		drmModeFreeConnector(conn);
 	}
+
 	drmModeFreeResources(res);
+
+	printf("selected connector(s)\n");
+	for (dev = dev_head; dev != NULL; dev = dev->next) {
+		printf("connector id:%d\n", dev->conn_id);
+		printf("\tencoder id:%d crtc id:%d\n", dev->enc_id, dev->crtc_id);
+		printf("\twidth:%d height:%d\n", dev->width, dev->height);
+	}
 
 	return dev_head;
 }
 
-void drm_setup_fb(int fd, struct drm_dev_t *dev)
+void drm_setup_fb(int fd, struct drm_dev_t *dev, int map, int export)
 {
-	struct drm_mode_create_dumb creq;
-	struct drm_mode_map_dumb mreq;
+	int i;
 
-	memset(&creq, 0, sizeof(struct drm_mode_create_dumb));
-	creq.width = dev->width;
-	creq.height = dev->height;
-	creq.bpp = BPP; // hard conding
+	for (i = 0; i < BUFCOUNT; i++) {
+		struct drm_mode_create_dumb create_req;
+		struct drm_mode_map_dumb map_req;
 
-	if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0)
-		fatal("drmIoctl DRM_IOCTL_MODE_CREATE_DUMB failed");
+		memset(&create_req, 0, sizeof(struct drm_mode_create_dumb));
+		create_req.width = dev->width;
+		create_req.height = dev->height;
+		create_req.bpp = BPP; // hard conding
 
-	dev->pitch = creq.pitch;
-	dev->size = creq.size;
-	dev->handle = creq.handle;
+		if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_req) < 0)
+			fatal("drmIoctl DRM_IOCTL_MODE_CREATE_DUMB failed");
 
-	if (drmModeAddFB(fd, dev->width, dev->height,
-		DEPTH, BPP, dev->pitch, dev->handle, &dev->fb_id))
-		fatal("drmModeAddFB failed");
+		dev->bufs[i].pitch = create_req.pitch;
+		dev->bufs[i].size = create_req.size;
+		/* GEM buffer handle */
+		dev->bufs[i].bo_handle = create_req.handle;
 
-	memset(&mreq, 0, sizeof(struct drm_mode_map_dumb));
-	mreq.handle = dev->handle;
+		if (drmModeAddFB(fd, dev->width, dev->height,
+			DEPTH, BPP, dev->bufs[i].pitch, dev->bufs[i].bo_handle, &dev->bufs[i].fb_id))
+			fatal("drmModeAddFB failed");
 
-	if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq))
-		fatal("drmIoctl DRM_IOCTL_MODE_MAP_DUMB failed");
+		if (export) {
+			int ret; 
 
-	dev->buf = (uint32_t *) emmap(0, dev->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mreq.offset);
+			ret = drmPrimeHandleToFD(fd, dev->bufs[i].bo_handle,
+				DRM_CLOEXEC | DRM_RDWR, &dev->bufs[i].dmabuf_fd);
+			if (ret < 0)
+				fatal("could not export the dump buffer");
+		}
+
+		if (map) {
+			memset(&map_req, 0, sizeof(struct drm_mode_map_dumb));
+			map_req.handle = dev->bufs[i].bo_handle;
+
+			if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req))
+				fatal("drmIoctl DRM_IOCTL_MODE_MAP_DUMB failed");
+			dev->bufs[i].buf = (uint32_t *) emmap(0, dev->bufs[i].size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map_req.offset);
+		}
+	}
 
 	dev->saved_crtc = drmModeGetCrtc(fd, dev->crtc_id); /* must store crtc data */
-	if (drmModeSetCrtc(fd, dev->crtc_id, dev->fb_id, 0, 0, &dev->conn_id, 1, &dev->mode))
-		fatal("drmModeSetCrtc() failed");
 
+	/* First buffer to DRM */
+	if (drmModeSetCrtc(fd, dev->crtc_id, dev->bufs[0].fb_id, 0, 0, &dev->conn_id, 1, &dev->mode))
+		fatal("drmModeSetCrtc() failed");
 }
 
 void drm_destroy(int fd, struct drm_dev_t *dev_head)
 {
 	struct drm_dev_t *devp, *devp_tmp;
 	struct drm_mode_destroy_dumb dreq;
+	int i;
 
 	for (devp = dev_head; devp != NULL;) {
 		if (devp->saved_crtc)
@@ -174,13 +213,17 @@ void drm_destroy(int fd, struct drm_dev_t *dev_head)
 				devp->saved_crtc->x, devp->saved_crtc->y, &devp->conn_id, 1, &devp->saved_crtc->mode);
 		drmModeFreeCrtc(devp->saved_crtc);
 
-		munmap(devp->buf, devp->size);
+		for (i = 0; i < BUFCOUNT; i++) {
+			munmap(devp->bufs[i].buf, devp->bufs[i].size);
 
-		drmModeRmFB(fd, devp->fb_id);
+			drmModeRmFB(fd, devp->bufs[i].fb_id);
 
-		memset(&dreq, 0, sizeof(dreq));
-		dreq.handle = devp->handle;
-		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+			memset(&dreq, 0, sizeof(dreq));
+			dreq.handle = devp->bufs[i].bo_handle;
+			drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+
+			/* TODO: Prime release */
+		}
 
 		devp_tmp = devp;
 		devp = devp->next;

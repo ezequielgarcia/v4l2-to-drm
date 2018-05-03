@@ -21,10 +21,19 @@
 
 struct buffer *buffers;
 static unsigned int n_buffers;
+static enum v4l2_memory memory_type;
 
-void v4l2_queue_buffer(int fd, struct v4l2_buffer *buf)
+void v4l2_queue_buffer(int fd, int index, int dmabuf_fd)
 {
-	if (-1 == xioctl(fd, VIDIOC_QBUF, buf))
+	struct v4l2_buffer buf;
+
+	CLEAR(buf);
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = memory_type;
+	buf.index = index;
+	if (memory_type == V4L2_MEMORY_DMABUF)
+		buf.m.fd = dmabuf_fd;
+	if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
 		errno_exit("VIDIOC_QBUF");
 }
 
@@ -33,7 +42,7 @@ void v4l2_dequeue_buffer(int fd, struct v4l2_buffer *buf)
 	PCLEAR(buf);
 
 	buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	buf->memory = V4L2_MEMORY_MMAP;
+	buf->memory = memory_type;
 
 	if (-1 == xioctl(fd, VIDIOC_DQBUF, buf)) {
 		switch (errno) {
@@ -59,7 +68,21 @@ void v4l2_stop_capturing(int fd)
 		errno_exit("VIDIOC_STREAMOFF");
 }
 
-void v4l2_start_capturing(int fd)
+void v4l2_start_capturing_dmabuf(int fd)
+{
+	enum v4l2_buf_type type;
+	unsigned int i;
+
+	/* One buffer held by DRM, the rest queued to video4linux */
+	for (i = 1; i < n_buffers; ++i)
+		v4l2_queue_buffer(fd, i, buffers[i].dmabuf_fd);
+
+	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (-1 == xioctl(fd, VIDIOC_STREAMON, &type))
+		errno_exit("VIDIOC_STREAMON");
+}
+
+void v4l2_start_capturing_mmap(int fd)
 {
 	enum v4l2_buf_type type;
 	unsigned int i;
@@ -91,15 +114,64 @@ void v4l2_uninit_device(void)
 	free(buffers);
 }
 
-static void v4l2_init_mmap(int fd)
+void v4l2_init_dmabuf(int fd, int *dmabufs, int count)
 {
 	struct v4l2_requestbuffers req;
 
 	CLEAR(req);
 
-	req.count = 4;
+	req.count = count;
+	req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	req.memory = V4L2_MEMORY_DMABUF;
+	memory_type = req.memory;
+
+	if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
+		if (EINVAL == errno) {
+			fprintf(stderr, "does not support dmabuf\n");
+			exit(EXIT_FAILURE);
+		} else {
+			errno_exit("VIDIOC_REQBUFS");
+		}
+	}
+
+	if (req.count < 2) {
+		fprintf(stderr, "Insufficient buffer memory\n");
+		exit(EXIT_FAILURE);
+	}
+
+	buffers = calloc(req.count, sizeof(*buffers));
+
+	if (!buffers) {
+		fprintf(stderr, "Out of memory\n");
+		exit(EXIT_FAILURE);
+	}
+
+	for (n_buffers = 0; n_buffers < req.count; ++n_buffers) {
+		struct v4l2_buffer buf;
+
+		CLEAR(buf);
+
+		buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory      = V4L2_MEMORY_DMABUF;
+		buf.index       = n_buffers;
+
+		if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf))
+			errno_exit("VIDIOC_QUERYBUF");
+		buffers[n_buffers].index = buf.index;
+		buffers[n_buffers].dmabuf_fd = dmabufs[n_buffers];
+	}
+}
+
+void v4l2_init_mmap(int fd, int count)
+{
+	struct v4l2_requestbuffers req;
+
+	CLEAR(req);
+
+	req.count = count;
 	req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	req.memory = V4L2_MEMORY_MMAP;
+	memory_type = req.memory;
 
 	if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
 		if (EINVAL == errno) {
@@ -147,7 +219,7 @@ static void v4l2_init_mmap(int fd)
 	}
 }
 
-void v4l2_init(int fd)
+void v4l2_init(int fd, int width, int height)
 {
 	struct v4l2_capability cap;
 	struct v4l2_cropcap cropcap;
@@ -195,8 +267,8 @@ void v4l2_init(int fd)
 
 	CLEAR(fmt);
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	fmt.fmt.pix.width       = 640;
-	fmt.fmt.pix.height      = 480;
+	fmt.fmt.pix.width       = width;
+	fmt.fmt.pix.height      = height;
 	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_ABGR32;
 	fmt.fmt.pix.field       = V4L2_FIELD_NONE;
 	fmt.fmt.pix.colorspace  = V4L2_COLORSPACE_RAW;
@@ -213,8 +285,6 @@ void v4l2_init(int fd)
 	min = fmt.fmt.pix.bytesperline * fmt.fmt.pix.height;
 	if (fmt.fmt.pix.sizeimage < min)
 		fmt.fmt.pix.sizeimage = min;
-
-	v4l2_init_mmap(fd);
 }
 
 int v4l2_open(const char *dev_name)

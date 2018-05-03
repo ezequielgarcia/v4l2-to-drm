@@ -21,19 +21,9 @@ static int wait_poll(int fd)
         return poll(fds, 1, 2000);
 }
 
-static void do_frame(int v4l2_fd, struct drm_dev_t *dev)
-{
-	struct v4l2_buffer buf;
-
-	v4l2_dequeue_buffer(v4l2_fd, &buf);
-
-	memcpy(dev->buf, buffers[buf.index].start, buf.bytesused);
-
-	v4l2_queue_buffer(v4l2_fd, &buf);
-}
-
 static void mainloop(int v4l2_fd, int drm_fd, struct drm_dev_t *dev)
 {
+	struct v4l2_buffer buf;
 	unsigned int count;
 	int r;
 
@@ -53,8 +43,15 @@ static void mainloop(int v4l2_fd, int drm_fd, struct drm_dev_t *dev)
 				exit(EXIT_FAILURE);
 			}
 
-			do_frame(v4l2_fd, dev);
-			drmModeDirtyFB(drm_fd, dev->fb_id, NULL, 0);
+			/* We can see how DQBUF/QBUF operations
+			 * act as the implicit synchronization
+			 * mechanism here.
+			 */
+			v4l2_dequeue_buffer(v4l2_fd, &buf);
+			memcpy(dev->bufs[0].buf, buffers[buf.index].start, buf.bytesused);
+			v4l2_queue_buffer(v4l2_fd, buf.index, -1);
+
+			drmModeDirtyFB(drm_fd, dev->bufs[0].fb_id, NULL, 0);
 		}
 	}
 }
@@ -72,22 +69,15 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	printf("available connector(s)\n");
-	for (dev = dev_head; dev != NULL; dev = dev->next) {
-		printf("connector id:%d\n", dev->conn_id);
-		printf("\tencoder id:%d crtc id:%d fb id:%d\n", dev->enc_id, dev->crtc_id, dev->fb_id);
-		printf("\twidth:%d height:%d\n", dev->width, dev->height);
-		printf("\tpitch:%d\n", dev->pitch);
-	}
-
 	getchar();
 
 	dev = dev_head;
-	drm_setup_fb(drm_fd, dev);
+	drm_setup_fb(drm_fd, dev, 1, 0);
 
 	v4l2_fd = v4l2_open(v4l2_path);
-	v4l2_init(v4l2_fd);
-	v4l2_start_capturing(v4l2_fd);
+	v4l2_init(v4l2_fd, dev->width, dev->height);
+	v4l2_init_mmap(v4l2_fd, BUFCOUNT);
+	v4l2_start_capturing_mmap(v4l2_fd);
 
 	mainloop(v4l2_fd, drm_fd, dev);
 

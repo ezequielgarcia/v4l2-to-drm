@@ -8,9 +8,13 @@ LIBS	:= -lrt -ldrm `pkg-config --libs libdrm`
 %.o : %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-all: test
+all: test-dmabuf test-mmap
 
-test: drm.o v4l2.o main.o
+test-dmabuf: drm.o v4l2.o test-dmabuf.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+test-mmap: drm.o v4l2.o test-mmap.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
 clean:
-	-rm -f *.o test
+	-rm -f *.o test-dmabuf test-mmap
